@@ -1,0 +1,518 @@
+---
+title: "Homework 3"
+output: flexdashboard::flex_dashboard
+runtime: shiny
+---
+
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(shiny)
+library(rmarkdown)
+library(knitr)
+library(Hmisc)
+library(DT)
+library(purrr)
+library(data.table)
+
+assignInNamespace(x = "cedta.override", value = c(data.table:::cedta.override,"rmarkdown"), ns = "data.table")
+
+opts_chunk$set(echo = FALSE, comment="", warning = FALSE, message = FALSE, tidy.opts=list(width.cutoff=55), 
+               tidy = TRUE)
+```
+
+
+```{r read_data, include=FALSE}
+dat <- fread(input = "../Data/Homework 3 Data.csv", verbose = FALSE)
+```
+
+
+```{r constants}
+id.name <- "id"
+age.name <- "Age"
+gender.name <- "Gender"
+income.name <- "Income"
+region.name <- "Region"
+persona.name <- "Persona"
+
+product.name <- "Product"
+awareness.name <- "Awareness"
+consideration.name <- "Consideration"
+consumption.name <- "Consumption"
+satisfaction.name <- "Satisfaction"
+advocacy.name <- "Advocacy"
+
+pattern.bp <- "BP_"
+
+age.group.name <- "Age Group"
+income.group.name <- "Income Group"
+aggregated.engagement.name <- "Aggregated Engagement"
+
+cuts.age <- c(18, 35, 50, 65, 120)
+cuts.income <- 1000* c(0, 50, 75, 100, 150, 250)
+```
+
+```{r}
+dat[, eval(age.group.name) := cut2(x = get(age.name), cuts = cuts.age)]
+dat[, eval(income.group.name) := cut2(x = get(income.name), cuts = cuts.income)]
+dat[, eval(satisfaction.name) := get(satisfaction.name)/10]
+
+unique.age.groups <- dat[, unique(get(age.group.name))] %>% sort(., decreasing = F)
+unique.genders <- dat[, unique(get(gender.name))]
+unique.income.groups <- dat[, unique(get(income.group.name))] %>% sort(., decreasing = F)
+unique.regions <- dat[, unique(get(region.name))]
+unique.personas <- dat[, unique(get(persona.name))]
+
+unique.products <- dat[, unique(get(product.name))]
+num.products <- length(unique.products)
+
+respondent.variables <- c(age.group.name, gender.name, income.group.name, region.name, persona.name)
+states.of.engagement <- c(awareness.name, consideration.name, consumption.name, satisfaction.name, advocacy.name)
+bp.traits <- names(dat)[grep(pattern = pattern.bp, x = names(dat))]
+```
+
+
+```{r functions}
+percentage.table <- function(x, digits = 1){
+  tab <- table(x)
+  percentage.tab <- 100*tab/(sum(tab))
+  rounded.tab <- round(x = percentage.tab, digits = digits)
+  return(rounded.tab)
+}
+
+
+round.numerics <- function(x, digits){
+  if(is.numeric(x)){
+    x <- round(x = x, digits = digits)
+  }
+  return(x)
+}
+
+
+mean.diff <- function(x, y){
+  return(mean(x, na.rm = TRUE) - mean(y, na.rm=TRUE))
+}
+
+
+invert_score <- function(score){
+  return(10 - score)
+}
+
+
+product_rank <- function(input){
+  subdat <- dat[get(age.group.name) %in% input$q2_age_group & get(gender.name) %in% input$q2_gender &
+                get(income.group.name) %in% input$q2_income_group &
+                get(region.name) %in% input$q2_region & get(persona.name) %in% input$q2_persona,]
+  product_rate <- subdat[, 100*mean(get(input$q2_state), na.rm = TRUE), by = product.name]
+  top_product <- product_rate[order(-product_rate[, 2])][1:input$q2_limit]
+  top_product[, 2] <- round(top_product[, 2], 1)
+  colnames(top_product) <- c("Product", "Rate")
+  return(top_product)
+}
+
+
+perception_rank <- function(input){
+  subdat <- dat[get(age.group.name) %in% input$q3_age_group & get(gender.name) %in% input$q3_gender &
+                get(income.group.name) %in% input$q3_income_group & get(region.name) %in% input$q3_region &
+                get(persona.name) %in% input$q3_persona,]
+
+  overall_avg <- subdat[, lapply(X = .SD, FUN = mean, na.rm = TRUE), .SDcol = c(8:24), by = product.name]
+  overall_pos_avg <- overall_avg[, c("BP_Boring_0_10", "BP_Bulky_0_10", "BP_Fragile_0_10", "BP_Expensive_0_10") 
+                                 := lapply(X = .SD, FUN = invert_score), 
+                                 .SDcol = c("BP_Boring_0_10", "BP_Bulky_0_10", "BP_Fragile_0_10", 
+                                            "BP_Expensive_0_10")]
+  overall_avg_perception <- overall_pos_avg[, apply(X = .SD, 1, FUN = mean), .SDcol = c(2:17), by = product.name]
+  colnames(overall_avg_perception) <- c("Product", "Overall Average Perception") 
+  perception_avg_rank <- overall_avg_perception[order(-overall_avg_perception[, 2])][1:input$q3_limit]
+  perception_avg_rank[, 2] <- round(perception_avg_rank[, 2], 1)
+  return(perception_avg_rank)
+}
+
+
+gaps <- function(input){
+  gap <- dat[, 100*mean.diff(get(input$q4_first_outcome), get(input$q4_second_outcome)), 
+                                      by = product.name]
+  gap_rank <- gap[order(-gap[, 2])][1:input$q4_number_of_top_products]
+  gap_rank[, 2] <- round(gap_rank[, 2], as.numeric(input$q4_digits))
+  colnames(gap_rank) <- c("Product", sprintf("Difference between %s and %s", eval(input$q4_first_outcome),
+                                             eval(input$q4_second_outcome)))
+  return(gap_rank)
+}
+
+
+aggregate_engagement <- function(df, product, outcome.name){
+  subdat <- df[get(product.name) != product, ]
+  outcome.dat <- subdat[, lapply(X = .SD, FUN = mean, na.rm = T), .SDcols = outcome.name, keyby = id.name]
+  colnames(outcome.dat) <- c("id", "Aggregated Engagement")
+  newdf <- df[get(product.name) == product, ]
+  res <- merge(newdf, outcome.dat, by = id.name)
+  return(res)
+}
+
+
+engagement.model <- function(dt, outcome.name, input.names, product, model.type){
+  res <- fit.model(dt = dt, outcome.name = outcome.name, input.names = input.names, model.type = model.type)
+  return(res)
+}
+
+
+fit.model <- function(dt, outcome.name, input.names, product, digits = 3, model.type){
+  the.formula <- reduce.formula(dt = dt, product = product, outcome.name = outcome.name, 
+                                input.names = input.names)
+  
+  if(model.type == "logistic"){
+    mod <- glm(formula = the.formula, family = "binomial", data = dt)
+    mod.summary <- logistic.regression.summary(glm.mod = mod, digits = digits)
+  }
+  if(model.type == "linear"){
+    mod <- lm(formula = the.formula, data = dt)
+    mod.summary <- linear.regression.summary(lm.mod = mod, digits = digits)
+  }
+  mod.summary.rounded <- mod.summary[, lapply(X = .SD, FUN = "round.numerics", digits = digits)]
+  return(mod.summary.rounded)
+}
+
+
+create.formula <- function(outcome.name, input.names, input.patterns = NA, 
+                           all.data.names = NA, return.as = "character"){
+  
+  variable.names.from.patterns <- c()
+  if(!is.na(input.patterns[1]) & !is.na(all.data.names[1])){
+    pattern <- paste(input.patterns, collapse = "|")
+    variable.names.from.patterns <- all.data.names[grep(pattern = pattern, x = all.data.names)]
+  }
+  all.input.names <- unique(c(input.names, variable.names.from.patterns))
+  all.input.names <- all.input.names[all.input.names != outcome.name]
+  
+  if(!is.na(all.data.names[1])){
+    all.input.names <- all.input.names[all.input.names %in% all.data.names]
+  }
+
+  input.names.delineated <- sprintf("`%s`", all.input.names)
+  the.formula <- sprintf("`%s` ~ %s", outcome.name, paste(input.names.delineated, collapse = "+"))
+  
+  if(return.as == "formula"){
+    return(as.formula(the.formula))
+  }
+  if(return.as != "formula"){
+    return(the.formula)
+  }
+}
+
+
+reduce.formula <- function(dt, product, outcome.name, input.names, input.patterns = NA, max.input.categories = 20,
+                           max.outcome.categories.to.search = 4, return.as = "formula"){
+  require(data.table)
+  dt <- setDT(dt)
+  
+  if(!(outcome.name %in% names(dt))){
+    return("Error:  outcome.name is not in names(dt).")
+  }
+  
+  pattern.names <- list()
+  if(!is.na(input.patterns[1])){
+    for(i in 1:length(input.patterns)){
+      pattern.names[[i]] <- names(dt)[grep(pattern = input.patterns[i], x = names(dt))]
+    }
+  }
+  all.input.names <- c(input.names, as.character(pattern.names))
+  
+  num.outcome.categories <- dt[!is.na(get(outcome.name)), length(unique(get(outcome.name)))]
+  
+  if(num.outcome.categories <= max.outcome.categories.to.search){
+    num.unique.tab <- dt[, lapply(X = .SD, FUN = function(x){return(length(unique(x[!is.na(x)])))}), 
+                         .SDcols = unlist(input.names), by = outcome.name]
+    min.categories.tab <- num.unique.tab[, lapply(X = .SD, FUN = "min"), .SDcols = unlist(input.names)]
+    
+    reduced.inputs <- names(min.categories.tab)[min.categories.tab >= 2]
+  }
+  if(num.outcome.categories > max.outcome.categories.to.search){
+    reduced.inputs <- all.input.names
+  }
+  
+  the.formula <- create.formula(outcome.name = outcome.name, input.names = reduced.inputs, 
+                                all.data.names = names(dt), input.patterns = NA, return.as = return.as)
+  return(the.formula)
+}
+
+
+logistic.regression.summary <- function(glm.mod, digits = 3){
+  library(data.table)
+  glm.coefs <- as.data.table(summary(glm.mod)$coefficients, keep.rownames = TRUE)
+  alpha = 0.05
+  z <- qnorm(p = 1-alpha/2, mean = 0, sd = 1)
+  glm.coefs[, Odds.Ratio := exp(Estimate)]
+  glm.coefs[, OR.Lower.95 := exp(Estimate - z * `Std. Error`)]
+  glm.coefs[, OR.Upper.95 := exp(Estimate + z * `Std. Error`)]
+  return(glm.coefs[])
+}
+
+
+linear.regression.summary <- function(lm.mod, digits = 3){
+  library(data.table)
+  lm.coefs <- as.data.table(summary(lm.mod)$coefficients, keep.rownames = TRUE)
+  alpha = 0.05
+  z <- qnorm(p = 1-alpha/2, mean = 0, sd = 1)
+  lm.coefs[, Coef.Lower.95 := Estimate - z * `Std. Error`]
+  lm.coefs[, Coef.Upper.95 := Estimate + z * `Std. Error`]
+  return(lm.coefs)
+}
+
+
+aggregated_outcome <- function(product, input, outcome.name){
+  subdat <- aggregate_engagement(dat, product, outcome.name)
+  
+  if(outcome.name == satisfaction.name){
+    model.type <- "linear"
+  }
+  if(outcome.name != satisfaction.name){
+    model.type <- "logistic"
+  }
+  
+  res <- engagement.model(dt = subdat, outcome.name = outcome.name, input.names = input, model.type = model.type)
+  
+  return(res)
+}
+```
+
+
+Introduction
+=====================================  
+
+We are analyzing data from the Marketing Department covering a variety of mobile phone products.  
+
+The survey was given to `r dat[, length(unique(get(id.name)))]` respondents and covered `r num.products` separate products.
+
+Click on the tabs to see different reports.
+
+
+Question 1
+===================================
+
+
+Row {data-height=500}
+-------------------------------------
+
+```{r respondents}
+inputPanel(
+  selectInput(inputId = "q1_respondent_variable", 
+              label = "Select Variable:", 
+              choices = respondent.variables, 
+              selected = respondent.variables[1]),
+  checkboxInput(inputId = "q1_respondent_show_percentages", 
+                label = "Show Percentages", 
+                value = TRUE)
+)
+
+
+renderPlot({
+  tab <- percentage.table(dat[, get(input$q1_respondent_variable)])
+  barplot(height = tab, space = 0.01, las = 1, main = input$q1_respondent_variable, ylab = "Percentage", 
+          xlab = input$q1_respondent_variable, ylim = c(0, 1.2*max(tab, na.rm = TRUE)), col = "dodgerblue")
+  
+  if(input$q1_respondent_show_percentages == TRUE){
+    space_val = 0
+    text(x = -0.4 + 1:length(tab) * (1+space_val), y = tab, labels = sprintf("%.1f%%", tab), pos = 3)
+  }
+})
+```
+
+Question 2
+=====================================  
+
+
+Row {data-height=800}
+-------------------------------------
+
+```{r products}
+inputPanel(
+  selectInput(inputId = "q2_state", 
+              label = "Select State of Engagement:", 
+              choices = states.of.engagement, 
+              selected = states.of.engagement[1]),
+  selectInput(inputId = "q2_age_group", 
+              label = "Age", 
+              choices = unique.age.groups, 
+              selected = unique.age.groups, 
+              multiple = TRUE),
+  selectInput(inputId = "q2_gender", 
+              label = "Gender", 
+              choices = unique.genders, 
+              selected = unique.genders, 
+              multiple = TRUE),
+  selectInput(inputId = "q2_income_group", 
+              label = "Income", 
+              choices = unique.income.groups, 
+              selected = unique.income.groups, 
+              multiple = TRUE),
+  selectInput(inputId = "q2_region", 
+              label = "Region", 
+              choices = unique.regions, 
+              selected = unique.regions, 
+              multiple = TRUE),
+  selectInput(inputId = "q2_persona", 
+              label = "Persona", 
+              choices = unique.personas, 
+              selected = unique.personas, 
+              multiple = TRUE),
+  selectInput(inputId = "q2_limit", 
+              label = "Limit", 
+              choices = c(1:20), 
+              selected = 5, 
+              multiple = FALSE),
+  checkboxInput(inputId = "q2_show_percentages", 
+                label = "Show Percentages", 
+                value = TRUE)
+)
+
+renderPlot({
+  tab <- product_rank(input)[, 2] %>% t()
+  colnames(tab) <- product_rank(input)[, 1] %>% t()
+  
+  barplot(height = tab, space = 0.01, las = 1, main = input$q2_state, ylab = "Rate", 
+          xlab = "Product", ylim = c(0, 1.2*max(tab, na.rm = TRUE)), col = "dodgerblue")
+  if(input$q2_show_percentages == TRUE){
+    space_val = 0
+    text(x = -0.4 + 1:length(tab) * (1+space_val), y = tab, labels = sprintf("%.1f%%", tab), pos = 3)
+  }
+})
+```
+
+
+Question 3
+=====================================  
+
+Row {data-height=500}
+-------------------------------------
+
+```{r brand_perceptions}
+inputPanel(
+  selectInput(inputId = "q3_state", 
+              label = "Select State of Engagement:", 
+              choices = states.of.engagement, 
+              selected = states.of.engagement[1]),
+  selectInput(inputId = "q3_age_group", 
+              label = "Age", 
+              choices = unique.age.groups, 
+              selected = unique.age.groups, 
+              multiple = TRUE),
+  selectInput(inputId = "q3_gender", 
+              label = "Gender", 
+              choices = unique.genders, 
+              selected = unique.genders, 
+              multiple = TRUE),
+  selectInput(inputId = "q3_income_group", 
+              label = "Income", 
+              choices = unique.income.groups, 
+              selected = unique.income.groups, 
+              multiple = TRUE),
+  selectInput(inputId = "q3_region", 
+              label = "Region", 
+              choices = unique.regions, 
+              selected = unique.regions, 
+              multiple = TRUE),
+  selectInput(inputId = "q3_persona", 
+              label = "Persona", 
+              choices = unique.personas, 
+              selected = unique.personas, 
+              multiple = TRUE),
+  selectInput(inputId = "q3_limit", 
+              label = "Limit", 
+              choices = c(1:20), 
+              selected = 5, 
+              multiple = FALSE)
+)
+
+
+renderPlot({
+  tab <- perception_rank(input)[, 2] %>% t()
+  colnames(tab) <- perception_rank(input)[, 1] %>% t()
+  
+  barplot(height = tab, space = 0.01, las = 1, main = input$q3_state, ylab = "Rate", 
+          xlab = "Product", ylim = c(0, 1.2*max(tab, na.rm = TRUE)), col = "dodgerblue")
+  text(x = -0.4 + 1:length(tab), y = tab, labels = tab, pos = 3)
+})
+
+```
+
+Question 4
+=====================================  
+
+Row {data-height=500}
+-------------------------------------
+
+```{r engagement_plots}
+inputPanel(
+  selectInput(inputId = "q4_first_outcome", 
+              label = "Select First Outcome:", 
+              choices = states.of.engagement, 
+              selected = states.of.engagement[1]),
+  selectInput(inputId = "q4_second_outcome", 
+              label = "Select Second Outcome:", 
+              choices = states.of.engagement, 
+              selected = states.of.engagement[1]),
+  selectInput(inputId = "q4_number_of_top_products", 
+              label = "Select Number of Top Products:", 
+              choices = c(1:20), 
+              selected = 5),
+  selectInput(inputId = "q4_digits", 
+              label = "Select Digits to round:", 
+              choices = c(1:10), 
+              selected = 1),  
+  checkboxInput(inputId = "q4_show_percentages", 
+              label = "Show Percentages", 
+              value = TRUE)
+)
+
+observe({
+  chocies <- states.of.engagement[!(states.of.engagement %in% input$q4_first_outcome)]
+  updateSelectizeInput(session, 'q4_second_outcome', choices = chocies)
+})
+
+
+renderPlot({
+  tab <- gaps(input)[, 2] %>% t()
+  colnames(tab) <- gaps(input)[, 1] %>% t()
+  
+  barplot(height = tab, space = 0.01, las = 1, main = rownames(tab), ylab = "Difference in Rate", 
+          xlab = "Product", ylim = c(0, 1.2*max(tab, na.rm = TRUE)), col = "dodgerblue")
+  if(input$q4_show_percentages == TRUE){
+    space_val = 0
+    text(x = -0.4 + 1:length(tab) * (1+space_val), y = tab, labels = paste(tab, "%", sep = ""), pos = 3)
+  }
+})
+
+```
+
+Question 5
+=====================================  
+
+Row {data-height=300}
+-------------------------------------
+
+
+```{r engagement_models}
+inputPanel(
+  selectInput(inputId = "q5_product", 
+              label = "Select Product:", 
+              choices = unique.products, 
+              selected = unique.products[1]),
+  selectInput(inputId = "q5_outcome", 
+              label = "Select Outcome:", 
+              choices = states.of.engagement, 
+              selected = states.of.engagement[1]),
+  selectInput(inputId = "q5_inputs", 
+              label = "Choose inputs:", 
+              choices = c(age.group.name, gender.name, region.name, income.group.name, persona.name,
+                          aggregated.engagement.name, bp.traits),
+              selected = c(age.group.name, gender.name, region.name, income.group.name), multiple = TRUE)
+)
+
+renderDataTable({
+  res <- aggregated_outcome(input$q5_product, input$q5_inputs, input$q5_outcome)
+  datatable(data = res)
+})
+```
+
+Row {data-height=700}
+-------------------------------------
